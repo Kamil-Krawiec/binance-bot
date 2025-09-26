@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Minimal helper for interacting with the Binance Spot Testnet."""
-
 from __future__ import annotations
 
 import os

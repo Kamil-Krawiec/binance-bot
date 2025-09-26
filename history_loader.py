@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Download historical candlestick data for configured Binance pairs and intervals."""
-
 from __future__ import annotations
 
 import time
