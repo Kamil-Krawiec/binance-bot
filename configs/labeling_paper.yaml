@@ -1,5 +1,6 @@
 symbol: "BTCUSDT"
 interval: "4h"
+start_date: "1 Jan 2020"  # for history_loader; not used in labeling
 fee: 0.002              
 
 backW: [1,2,3,4,5]

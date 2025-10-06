@@ -6,13 +6,8 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List
 
 import yaml
-from history_loader import ensure_history  
-
-from pipeline_stage1 import (
-    Stage1Config,
-    Stage1Paths,
-    Stage1Pipeline,
-)
+from history_loader import HistoryLoader
+from pipeline_stage1 import Stage1Config, Stage1Paths, Stage1Pipeline
 
 
 def read_yaml(path: Path) -> Dict[str, Any]:
@@ -127,6 +122,7 @@ def build_stage1_config(label_cfg: Path, paths_cfg: Path) -> Stage1Config:
     beta_const = labeling_raw.get("beta_const", None)
     alpha_const = float(alpha_const) if alpha_const is not None else None
     beta_const = float(beta_const) if beta_const is not None else None
+    start_date = labeling_raw.get("start_date", "1 Jan 2020")  # for history_loader; not used in labeling
 
     single_pct = _single_candle_percentiles(labeling_raw.get("single_candle_percentiles"))
     scale_beta_per_step = float(labeling_raw.get("scale_beta_per_step", 0.10))
@@ -158,6 +154,7 @@ def build_stage1_config(label_cfg: Path, paths_cfg: Path) -> Stage1Config:
         beta_const=beta_const,                              
         single_candle_percentiles=single_pct,               
         scale_beta_per_step=scale_beta_per_step,             # (+10% per step by default)
+        start_date=start_date,
     )
 
 
@@ -189,7 +186,8 @@ def main(argv: List[str] | None = None) -> int:
         print(f"Failed to load configuration: {exc}")
         return 1
 
-    pipeline = Stage1Pipeline(cfg)
+    history_loader = HistoryLoader()
+    pipeline = Stage1Pipeline(cfg, history_loader=history_loader)
     try:
         qa_report = pipeline.run()
     except Exception as exc:

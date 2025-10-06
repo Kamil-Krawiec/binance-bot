@@ -4,10 +4,8 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple, Optional
-
 import pandas as pd
-
-from history_loader import load_history
+from history_loader import HistoryLoader
 
 
 Label = Literal["BUY", "HOLD", "SELL"]
@@ -78,6 +76,7 @@ class Stage1Config:
     beta_const: Optional[float] = None
     single_candle_percentiles: Dict[str, float] = None  # {"alpha_pct": 0.25, "beta_pct": 0.997}
     scale_beta_per_step: float = 0.10
+    start_date: str = "1 Jan 2020"  # for history_loader; not used in labeling
 
 def interval_to_minutes(interval: str) -> int:
     units = {"m": 1, "h": 60, "d": 1440, "w": 10080}
@@ -102,54 +101,6 @@ def _write_dataframe(df: pd.DataFrame, target: Path, *, index: bool) -> Path:
         fallback = target.with_suffix(".csv")
         df.to_csv(fallback, index=index)
         return fallback
-
-
-class OHLCVLoader:
-    """Load and normalize OHLCV history produced by history_loader."""
-
-    def __init__(self, symbol: str, interval: str, paths: Stage1Paths) -> None:
-        self.symbol = symbol
-        self.interval = interval
-        self.paths = paths
-
-    def load(self) -> pd.DataFrame:
-        raw_df = load_history(self.symbol, self.interval)
-        if raw_df.empty:
-            raise ValueError(
-                f"No historical data found for {self.symbol} {self.interval}. Run history_loader first."
-            )
-
-        if "open_dt" in raw_df.columns:
-            ts = pd.to_datetime(raw_df["open_dt"], utc=True)
-        elif "open_time" in raw_df.columns:
-            ts = pd.to_datetime(raw_df["open_time"], unit="ms", utc=True)
-        else:
-            raise ValueError("History must include either 'open_dt' or 'open_time' column")
-
-        required_cols = ["open", "high", "low", "close", "volume"]
-        missing = [col for col in required_cols if col not in raw_df.columns]
-        if missing:
-            raise ValueError(f"Missing required OHLCV columns: {missing}")
-
-        clean_df = pd.DataFrame(
-            {
-                "ts": ts,
-                "open": raw_df["open"].astype(float),
-                "high": raw_df["high"].astype(float),
-                "low": raw_df["low"].astype(float),
-                "close": raw_df["close"].astype(float),
-                "volume": raw_df["volume"].astype(float),
-            }
-        )
-        clean_df = (
-            clean_df.dropna(subset=["ts"])
-            .drop_duplicates(subset=["ts"], keep="last")
-            .sort_values("ts")
-            .set_index("ts")
-        )
-        processed_path = self.paths.processed_file(self.symbol, self.interval)
-        _write_dataframe(clean_df, processed_path, index=True)
-        return clean_df
 
 
 class DataQualityChecker:
@@ -450,44 +401,16 @@ class ArtifactWriter:
 
         report_base = self.paths.report_base(self.symbol, self.interval, backW, forW)
         report_json = report_base.with_suffix(".json")
-        report_md = report_base.with_suffix(".md")
 
         report_json.write_text(json.dumps(report, indent=2, default=str))
 
-        label_lines = [
-            f"- BUY: {counts['BUY']}",
-            f"- HOLD: {counts['HOLD']}",
-            f"- SELL: {counts['SELL']}",
-            f"- NaN: {nan_count}",
-        ]
-        distribution_lines = [f"- {label}: {distribution[label]:.4f}" for label in LABEL_VALUES]
-
-        report_md.write_text(
-            "\n".join(
-                [
-                    f"# Stage 1 Dataset {self.symbol} {self.interval} backW={backW} forW={forW}",
-                    "",
-                    f"- dataset: {dataset_path}",
-                    f"- alpha: {alpha:.6f}",
-                    f"- beta: {beta:.6f}",
-                    f"- fee: {self.fee:.6f}",
-                    "",
-                    "## Label Counts",
-                    *label_lines,
-                    "",
-                    "## Distribution",
-                    *distribution_lines,
-                ]
-            )
-        )
-
-
 class Stage1Pipeline:
     """Stage 1 pipeline orchestrating loader, QA, labeling, and persistence."""
+
     def __init__(
         self,
         cfg: Stage1Config,
-        loader: 'OHLCVLoader' | None = None,
+        history_loader: HistoryLoader | None = None,
         quality_checker: 'DataQualityChecker' | None = None,
         return_calculator: 'ForwardReturnCalculator' | None = None,
         calibrator: 'ThresholdCalibrator' | None = None,
@@ -499,8 +422,7 @@ class Stage1Pipeline:
         self.cfg = cfg
         self.paths = cfg.paths
         self.paths.ensure()
-
-        self.loader = loader or OHLCVLoader(cfg.symbol, cfg.interval, self.paths)
+        self.history_loader = history_loader or HistoryLoader()
         self.quality_checker = quality_checker or DataQualityChecker()
         self.return_calculator = return_calculator or ForwardReturnCalculator(cfg.fee)
         self.calibrator = calibrator or ThresholdCalibrator(cfg)
@@ -508,7 +430,6 @@ class Stage1Pipeline:
         self.window_indexer = window_indexer or WindowIndexer()
         self.artifact_writer = artifact_writer or ArtifactWriter(self.paths, cfg.symbol, cfg.interval, cfg.fee)
         self.ema_calc = ema_calc or EMACalculator()
-
         self.df: pd.DataFrame | None = None
         self.qa_report: QAReport | None = None
 
@@ -519,7 +440,11 @@ class Stage1Pipeline:
           - Scale beta per forward horizon (beta_forW = beta*(1 + 0.1*(forW-1)))
           - Optionally compute EMA(backW) for completeness (not used in labels)
         """
-        df = self.loader.load()
+        df = self.history_loader.load(self.cfg.symbol, self.cfg.interval, start_time=self.cfg.start_date)
+        if df.empty:
+            raise ValueError(f"No data available for {self.cfg.symbol} {self.cfg.interval}")
+        processed_path = self.paths.processed_file(self.cfg.symbol, self.cfg.interval)
+        _write_dataframe(df, processed_path, index=True)
         self.df = df
 
         interval_minutes = interval_to_minutes(self.cfg.interval)
