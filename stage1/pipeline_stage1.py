@@ -156,7 +156,7 @@ class ForwardReturnCalculator:
     def compute(self, df: pd.DataFrame, forW: int) -> pd.Series:
         """
         R_{t,k} = (Close_{t+k} - Open_t) / Open_t - fee
-        the same as in the paper
+        practically the same as in the paper, but way cleaner:
         forward = ((1 - self.fee) * future_close - (1 + self.fee) * df["open"]) / df["open"]
 
         Notes:
@@ -251,8 +251,11 @@ class ThresholdCalibrator:
         alpha_pct = float(self.cfg.single_candle_percentiles.get("alpha_pct", 0.25))
         beta_pct  = float(self.cfg.single_candle_percentiles.get("beta_pct", 0.997))
 
-        self._alpha_global = float(r1.quantile(alpha_pct).abs())  # magnitude threshold
-        self._beta_global  = float(r1.quantile(beta_pct).abs())
+        self._alpha_global = float(abs(r1.quantile(alpha_pct)))  # magnitude threshold
+        self._beta_global  = float(abs(r1.quantile(beta_pct)))   # magnitude threshold
+        if self._beta_global < self._alpha_global:
+            self._beta_global = self._alpha_global
+        
 
     def calibrate(self, forward_abs: pd.Series, forW: int) -> Tuple[float, float]:
         """
@@ -370,6 +373,7 @@ class ArtifactWriter:
                 "alpha": alpha,
                 "beta": beta,
                 "fee": self.fee,
+                "ema_backW": df.get(f"ema_backW_{backW}"),
             }
         )
 
