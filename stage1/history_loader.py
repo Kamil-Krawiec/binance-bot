@@ -76,6 +76,8 @@ def load_history(symbol: str, interval: str) -> pd.DataFrame:
     path = history_path(symbol, interval)
     if not path.exists():
         return pd.DataFrame()
+    
+    
     df = pd.read_csv(path)
     if df.empty:
         return df

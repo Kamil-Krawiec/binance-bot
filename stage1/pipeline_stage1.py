@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Literal, Tuple
+from typing import Dict, List, Literal, Tuple, Optional
 
 import pandas as pd
 
@@ -12,6 +12,7 @@ from history_loader import load_history
 
 Label = Literal["BUY", "HOLD", "SELL"]
 LABEL_VALUES: List[Label] = ["BUY", "HOLD", "SELL"]
+CalibrationMode = Literal["exact_paper", "per_forw_percentile"]
 
 
 @dataclass
@@ -28,44 +29,55 @@ class QAReport:
 @dataclass
 class Stage1Paths:
     """Filesystem layout for Stage 1 artifacts."""
-
     processed_dir: Path
     datasets_dir: Path
     reports_dir: Path
-
     def ensure(self) -> None:
         for folder in (self.processed_dir, self.datasets_dir, self.reports_dir):
             folder.mkdir(parents=True, exist_ok=True)
-
     @staticmethod
     def _safe_interval(interval: str) -> str:
         return interval.replace("/", "-")
-
     def processed_file(self, symbol: str, interval: str) -> Path:
         safe_interval = self._safe_interval(interval)
         return self.processed_dir / f"{symbol}_{safe_interval}.parquet"
-
     def dataset_file(self, symbol: str, interval: str, backW: int, forW: int) -> Path:
         safe_interval = self._safe_interval(interval)
         return self.datasets_dir / f"{symbol}_{safe_interval}_backW{backW}_forW{forW}.parquet"
-
     def report_base(self, symbol: str, interval: str, backW: int, forW: int) -> Path:
         safe_interval = self._safe_interval(interval)
         return self.reports_dir / f"{symbol}_{safe_interval}_backW{backW}_forW{forW}"
 
 
+
 @dataclass
 class Stage1Config:
-    """Immutable configuration bundle for Stage 1 labeling pipeline."""
+    """
+    Immutable configuration bundle for Stage 1 labeling pipeline.
 
+    New fields for "by-the-book" calibration:
+      - calibration_mode:
+          * "exact_paper": alpha/beta computed globally from 1-candle returns,
+                           then beta is scaled by (1 + scale_beta_per_step*(forW-1))
+          * "per_forw_percentile": legacy/adaptive mode (percentiles per forW)
+      - alpha_const, beta_const: optional hard-coded constants (override)
+      - single_candle_percentiles: percentiles for deriving (alpha,beta) from
+                                   the Open->Close 1-bar distribution (if not using constants)
+      - scale_beta_per_step: multiplicative growth of beta per +1 forward bar,
+                             default 0.10 (i.e., +10% per step) per the paper
+    """
     symbol: str
     interval: str
     fee: float
     backW_values: List[int]
     forW_values: List[int]
-    percentiles_by_forW: Dict[int, Dict[str, float]]
+    percentiles_by_forW: Dict[int, Dict[str, float]]  # used only in per_forw_percentile
     paths: Stage1Paths
-
+    calibration_mode: CalibrationMode = "exact_paper"
+    alpha_const: Optional[float] = None
+    beta_const: Optional[float] = None
+    single_candle_percentiles: Dict[str, float] = None  # {"alpha_pct": 0.25, "beta_pct": 0.997}
+    scale_beta_per_step: float = 0.10
 
 def interval_to_minutes(interval: str) -> int:
     units = {"m": 1, "h": 60, "d": 1440, "w": 10080}
@@ -180,42 +192,151 @@ class DataQualityChecker:
 
 
 class ForwardReturnCalculator:
-    """Compute forward returns for labeling."""
+    """Compute forward returns for labeling (paper-consistent)."""
 
     def __init__(self, fee: float) -> None:
+        """
+        Args:
+            fee: Total round-trip fee as a fraction (e.g., 0.002 for 0.2%).
+                 This is subtracted once from the percentage price change.
+        """
         self.fee = fee
 
     def compute(self, df: pd.DataFrame, forW: int) -> pd.Series:
-        if forW < 0:
-            raise ValueError("forW must be non-negative")
+        """
+        R_{t,k} = (Close_{t+k} - Open_t) / Open_t - fee
+        the same as in the paper
+        forward = ((1 - self.fee) * future_close - (1 + self.fee) * df["open"]) / df["open"]
+
+        Notes:
+          - Enforces forW >= 1; there is no forW=0 labeling in the paper.
+          - Uses only Open_t and Close_{t+k} (no leakage).
+        """
+        if forW < 1:
+            raise ValueError("forW must be >= 1")
         if df.empty:
             return pd.Series(dtype="float64")
+
         future_close = df["close"].shift(-forW)
-        forward = ((1 - self.fee) * future_close - (1 + self.fee) * df["open"]) / df["open"]
+        pct_change = (future_close - df["open"]) / df["open"]
+        forward = pct_change - self.fee
         forward.name = f"forward_{forW}"
         return forward
+    
+class EMACalculator:
+    """
+    Compute EMA over the backward window.
 
+    This is optional for Stage 1 labeling (labels come from forward returns),
+    but included to be faithful to the paper's pipeline where EMA(backW) is
+    computed as part of the procedure.
+    """
+
+    def compute(self, df: pd.DataFrame, backW: int) -> pd.Series:
+        """
+        Args:
+            df: OHLCV DataFrame (must include 'close').
+            backW: Backward window length >= 1.
+
+        Returns:
+            pandas Series with EMA(backW) aligned to df.index.
+        """
+        if backW < 1:
+            raise ValueError("backW must be >= 1")
+        ema = df["close"].ewm(span=backW, adjust=False).mean()
+        ema.name = f"ema_backW_{backW}"
+        return ema
 
 class ThresholdCalibrator:
-    """Pick alpha/beta thresholds from absolute forward returns."""
+    """
+    Calibrate alpha/beta thresholds for labeling.
 
-    def __init__(self, percentiles_by_forW: Dict[int, Dict[str, float]]) -> None:
-        self.percentiles_by_forW = percentiles_by_forW
+    Modes:
+      - exact_paper:
+          * Compute (alpha, beta) once from the distribution of 1-candle
+            Open->Close percentage changes across the whole dataset
+            (or take provided constants).
+          * For a given forW, return (alpha, beta * (1 + scale * (forW - 1))).
+      - per_forw_percentile:
+          * Legacy/adaptive: derive (alpha, beta) from |R_{t,forW}| percentiles.
+    """
+
+    def __init__(
+        self,
+        cfg: Stage1Config
+    ) -> None:
+        self.cfg = cfg
+        self._alpha_global: Optional[float] = None
+        self._beta_global: Optional[float] = None
+
+    # ---- exact_paper helpers -------------------------------------------------
+    def _single_candle_returns(self, df: pd.DataFrame) -> pd.Series:
+        """
+        Compute 1-bar percentage change: (Close_t - Open_t)/Open_t over the whole dataset.
+        Used to derive global (alpha, beta) percentiles if no constants are provided.
+        """
+        r1 = (df["close"] - df["open"]) / df["open"]
+        return r1.dropna()
+
+    def prepare_global_thresholds(self, df: pd.DataFrame) -> None:
+        """
+        Prepare global alpha/beta for "exact_paper" mode.
+
+        Priority:
+          1) If alpha_const and beta_const are provided -> use them directly.
+          2) Else derive from single-candle returns using configured percentiles.
+        """
+        if self.cfg.alpha_const is not None and self.cfg.beta_const is not None:
+            self._alpha_global = float(self.cfg.alpha_const)
+            self._beta_global  = float(self.cfg.beta_const)
+            return
+
+        if not self.cfg.single_candle_percentiles:
+            # Sensible defaults mirroring the paper's spirit:
+            # alpha ~ lower percentile, beta ~ very high percentile
+            self.cfg.single_candle_percentiles = {"alpha_pct": 0.25, "beta_pct": 0.997}
+
+        r1 = self._single_candle_returns(df)
+        alpha_pct = float(self.cfg.single_candle_percentiles.get("alpha_pct", 0.25))
+        beta_pct  = float(self.cfg.single_candle_percentiles.get("beta_pct", 0.997))
+
+        self._alpha_global = float(r1.quantile(alpha_pct).abs())  # magnitude threshold
+        self._beta_global  = float(r1.quantile(beta_pct).abs())
 
     def calibrate(self, forward_abs: pd.Series, forW: int) -> Tuple[float, float]:
-        params = self.percentiles_by_forW.get(forW)
+        """
+        Return (alpha, beta) for the given forward horizon.
+
+        In exact_paper mode:
+          - ignores `forward_abs` (uses global thresholds prepared beforehand)
+          - returns (alpha_global, beta_global * (1 + scale*(forW-1)))
+
+        In per_forw_percentile mode:
+          - computes (alpha, beta) from |R_{t,forW}| percentiles as before.
+        """
+        mode = self.cfg.calibration_mode
+
+        if mode == "exact_paper":
+            if self._alpha_global is None or self._beta_global is None:
+                raise RuntimeError("Call prepare_global_thresholds(df) before calibrate() in exact_paper mode.")
+            alpha = self._alpha_global
+            beta  = self._beta_global * (1.0 + self.cfg.scale_beta_per_step * (forW - 1))
+            # guard just in case
+            if beta < alpha:
+                beta = alpha
+            return float(alpha), float(beta)
+
+        # Legacy/adaptive mode - maybe worth executing and playing
+        params = self.cfg.percentiles_by_forW.get(forW)
         if params is None:
-            raise KeyError(f"Percentiles not configured for forW={forW}")
+            raise KeyError(f"Percentiles not configured for forW={forW} (per_forw_percentile mode).")
         if forward_abs.empty:
-            raise ValueError("Forward returns series is empty for calibration")
+            raise ValueError("Forward returns series is empty for calibration.")
 
-        alpha_pct = params.get("alpha_pct")
-        beta_pct = params.get("beta_pct")
-        if alpha_pct is None or beta_pct is None:
-            raise KeyError(f"alpha_pct/beta_pct missing for forW={forW}")
-
+        alpha_pct = float(params.get("alpha_pct"))
+        beta_pct  = float(params.get("beta_pct"))
         alpha = float(forward_abs.quantile(alpha_pct))
-        beta = float(forward_abs.quantile(beta_pct))
+        beta  = float(forward_abs.quantile(beta_pct))
         if beta < alpha:
             beta = alpha
         return alpha, beta
@@ -245,18 +366,22 @@ class WindowIndexer:
     """Enumerate valid sample indices for given (backW, forW)."""
 
     def build(self, df: pd.DataFrame, backW: int, forW: int) -> pd.DataFrame:
+        """
+        Ensures both backward context and forward target exist.
+        Returns DataFrame with columns ['t','backW','forW'] indexed by valid timestamps.
+        """
         if backW < 1:
             raise ValueError("backW must be >= 1")
-        if forW < 0:
-            raise ValueError("forW must be >= 0")
+        if forW < 1:
+            raise ValueError("forW must be >= 1")
 
         n = len(df)
         if n == 0:
             empty_index = pd.DatetimeIndex([])
             return pd.DataFrame(columns=["t", "backW", "forW"], index=empty_index)
 
-        start = max(backW - 1, 0)
-        end = n if forW == 0 else n - forW
+        start = backW - 1
+        end = n - forW
         if end <= start:
             empty_index = pd.DatetimeIndex([])
             return pd.DataFrame(columns=["t", "backW", "forW"], index=empty_index)
@@ -359,17 +484,17 @@ class ArtifactWriter:
 
 class Stage1Pipeline:
     """Stage 1 pipeline orchestrating loader, QA, labeling, and persistence."""
-
     def __init__(
         self,
         cfg: Stage1Config,
-        loader: OHLCVLoader | None = None,
-        quality_checker: DataQualityChecker | None = None,
-        return_calculator: ForwardReturnCalculator | None = None,
-        calibrator: ThresholdCalibrator | None = None,
-        label_assigner: LabelAssigner | None = None,
-        window_indexer: WindowIndexer | None = None,
-        artifact_writer: ArtifactWriter | None = None,
+        loader: 'OHLCVLoader' | None = None,
+        quality_checker: 'DataQualityChecker' | None = None,
+        return_calculator: 'ForwardReturnCalculator' | None = None,
+        calibrator: 'ThresholdCalibrator' | None = None,
+        label_assigner: 'LabelAssigner' | None = None,
+        window_indexer: 'WindowIndexer' | None = None,
+        artifact_writer: 'ArtifactWriter' | None = None,
+        ema_calc: 'EMACalculator' | None = None,
     ) -> None:
         self.cfg = cfg
         self.paths = cfg.paths
@@ -378,15 +503,22 @@ class Stage1Pipeline:
         self.loader = loader or OHLCVLoader(cfg.symbol, cfg.interval, self.paths)
         self.quality_checker = quality_checker or DataQualityChecker()
         self.return_calculator = return_calculator or ForwardReturnCalculator(cfg.fee)
-        self.calibrator = calibrator or ThresholdCalibrator(cfg.percentiles_by_forW)
+        self.calibrator = calibrator or ThresholdCalibrator(cfg)
         self.label_assigner = label_assigner or LabelAssigner()
         self.window_indexer = window_indexer or WindowIndexer()
         self.artifact_writer = artifact_writer or ArtifactWriter(self.paths, cfg.symbol, cfg.interval, cfg.fee)
+        self.ema_calc = ema_calc or EMACalculator()
 
         self.df: pd.DataFrame | None = None
         self.qa_report: QAReport | None = None
 
     def run(self) -> QAReport:
+        """
+        Orchestrate Stage 1 with "by-the-book" calibration:
+          - Prepare global (alpha,beta) from single-candle returns (or constants)
+          - Scale beta per forward horizon (beta_forW = beta*(1 + 0.1*(forW-1)))
+          - Optionally compute EMA(backW) for completeness (not used in labels)
+        """
         df = self.loader.load()
         self.df = df
 
@@ -396,21 +528,32 @@ class Stage1Pipeline:
         if qa_report.status == "FAIL":
             raise RuntimeError(f"QA failed: {qa_report}")
 
+        # Prepare global thresholds once (exact_paper mode)
+        if self.cfg.calibration_mode == "exact_paper":
+            self.calibrator.prepare_global_thresholds(df)
+
         for forW in self.cfg.forW_values:
             forward = self.return_calculator.compute(df, forW)
             forward_abs = forward.abs().dropna()
-            if forward_abs.empty:
-                continue
+
+            # alpha/beta per paper: ignore forward_abs, use global; per_forw_percentile: use forward_abs
             alpha, beta = self.calibrator.calibrate(forward_abs, forW)
             labels_all = self.label_assigner.assign(forward, alpha, beta)
 
             for backW in self.cfg.backW_values:
-                windows = self.window_indexer.build(df, backW, forW)
+                # Optional: compute EMA(backW) for completeness (not used in labeling rule) will be used later on in stage 2
+                ema_col = self.ema_calc.compute(df, backW)
+                df_with_ema = df.copy()
+                df_with_ema[ema_col.name] = ema_col
+
+                windows = self.window_indexer.build(df_with_ema, backW, forW)
                 if windows.empty:
                     continue
+
                 index = windows.index
-                sliced_df = df.loc[index]
+                sliced_df = df_with_ema.loc[index]
                 sliced_labels = labels_all.loc[index]
+
                 self.artifact_writer.write(sliced_df, sliced_labels, backW, forW, alpha, beta)
 
         return qa_report

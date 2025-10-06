@@ -1,8 +1,12 @@
-symbol: "BTCUSDT"
+symbol: "BTCUSDC"
 interval: "1h"
-fee: 0.002           # 0.2% fee taker+maker
+fee: 0.002
+
 backW: [1,2,3,4,5]
 forW:  [1,2,3,4,5]
+
+calibration_mode: "per_forw_percentile"
+
 percentiles_by_forW:
   "1": {alpha_pct: 0.30, beta_pct: 0.90}
   "2": {alpha_pct: 0.30, beta_pct: 0.92}
