@@ -1,3 +1,5 @@
 binance-connector 
 python-dotenv 
 pandas
+pyyaml
+pyarrow

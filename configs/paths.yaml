@@ -1,0 +1,3 @@
+processed_dir: "data/processed"
+datasets_dir: "data/datasets"
+reports_dir: "data/reports"

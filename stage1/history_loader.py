@@ -90,7 +90,7 @@ def load_history(symbol: str, interval: str) -> pd.DataFrame:
     if "open_dt" in df:
         df["open_dt"] = pd.to_datetime(df["open_dt"], utc=True)
     if "close_dt" in df:
-        df["close_dt"] = pd.to_datetime(df["close_dt"], utc=True)
+        df["close_dt"] = pd.to_datetime(df["close_dt"], format='ISO8601', utc=True)
     return df.sort_values("open_time").drop_duplicates(subset=["open_time"])
 
 

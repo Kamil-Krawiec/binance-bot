@@ -1,0 +1,11 @@
+symbol: "BTCUSDT"
+interval: "1h"
+fee: 0.002           # 0.2% fee taker+maker
+backW: [1,2,3,4,5]
+forW:  [1,2,3,4,5]
+percentiles_by_forW:
+  "1": {alpha_pct: 0.30, beta_pct: 0.90}
+  "2": {alpha_pct: 0.30, beta_pct: 0.92}
+  "3": {alpha_pct: 0.30, beta_pct: 0.94}
+  "4": {alpha_pct: 0.30, beta_pct: 0.95}
+  "5": {alpha_pct: 0.30, beta_pct: 0.95}
