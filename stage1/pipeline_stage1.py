@@ -5,8 +5,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Literal, Tuple, Optional
 import pandas as pd
-from history_loader import HistoryLoader
-
+# from history_loader import HistoryLoader
+try:
+    from history_loader import HistoryLoader
+except ImportError:
+    from .history_loader import HistoryLoader
 
 Label = Literal["BUY", "HOLD", "SELL"]
 LABEL_VALUES: List[Label] = ["BUY", "HOLD", "SELL"]

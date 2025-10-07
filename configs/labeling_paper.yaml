@@ -8,6 +8,6 @@ forW:  [1,2,3,4,5]
 
 calibration_mode: "exact_paper"
 single_candle_percentiles:
-  alpha_pct: 0.25
+  alpha_pct: 0.24
   beta_pct: 0.997
 scale_beta_per_step: 0.10
