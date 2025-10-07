@@ -156,8 +156,6 @@ class ForwardReturnCalculator:
     def compute(self, df: pd.DataFrame, forW: int) -> pd.Series:
         """
         R_{t,k} = (Close_{t+k} - Open_t) / Open_t - fee
-        practically the same as in the paper, but way cleaner:
-        forward = ((1 - self.fee) * future_close - (1 + self.fee) * df["open"]) / df["open"]
 
         Notes:
           - Enforces forW >= 1; there is no forW=0 labeling in the paper.
@@ -169,8 +167,8 @@ class ForwardReturnCalculator:
             return pd.Series(dtype="float64")
 
         future_close = df["close"].shift(-forW)
-        pct_change = (future_close - df["open"]) / df["open"]
-        forward = pct_change - self.fee
+        # PAPER-FAITHFUL:
+        forward = ((1.0 - self.fee) * future_close - (1.0 + self.fee) * df["open"]) / df["open"]
         forward.name = f"forward_{forW}"
         return forward
     
@@ -220,14 +218,11 @@ class ThresholdCalibrator:
         self._alpha_global: Optional[float] = None
         self._beta_global: Optional[float] = None
 
-    # ---- exact_paper helpers -------------------------------------------------
-    def _single_candle_returns(self, df: pd.DataFrame) -> pd.Series:
-        """
-        Compute 1-bar percentage change: (Close_t - Open_t)/Open_t over the whole dataset.
-        Used to derive global (alpha, beta) percentiles if no constants are provided.
-        """
-        r1 = (df["close"] - df["open"]) / df["open"]
-        return r1.dropna()
+
+    def _single_candle_abs_returns(self, df: pd.DataFrame) -> pd.Series:
+        close_fwd = df["close"].shift(-1)
+        r1 = ((1.0 - self.cfg.fee) * close_fwd - (1.0 + self.cfg.fee) * df["open"]) / df["open"]
+        return r1.abs().dropna()
 
     def prepare_global_thresholds(self, df: pd.DataFrame) -> None:
         """
@@ -239,20 +234,18 @@ class ThresholdCalibrator:
         """
         if self.cfg.alpha_const is not None and self.cfg.beta_const is not None:
             self._alpha_global = float(self.cfg.alpha_const)
-            self._beta_global  = float(self.cfg.beta_const)
+            self._beta_global = float(self.cfg.beta_const)
             return
-
+        
         if not self.cfg.single_candle_percentiles:
-            # Sensible defaults mirroring the paper's spirit:
-            # alpha ~ lower percentile, beta ~ very high percentile
-            self.cfg.single_candle_percentiles = {"alpha_pct": 0.25, "beta_pct": 0.997}
+            self.cfg.single_candle_percentiles = {"alpha_pct": 0.05, "beta_pct": 0.997}
 
-        r1 = self._single_candle_returns(df)
-        alpha_pct = float(self.cfg.single_candle_percentiles.get("alpha_pct", 0.25))
-        beta_pct  = float(self.cfg.single_candle_percentiles.get("beta_pct", 0.997))
+        r1_abs = self._single_candle_abs_returns(df)
+        alpha_pct = float(self.cfg.single_candle_percentiles["alpha_pct"])
+        beta_pct  = float(self.cfg.single_candle_percentiles["beta_pct"])
 
-        self._alpha_global = float(abs(r1.quantile(alpha_pct)))  # magnitude threshold
-        self._beta_global  = float(abs(r1.quantile(beta_pct)))   # magnitude threshold
+        self._alpha_global = float(r1_abs.quantile(alpha_pct))
+        self._beta_global  = float(r1_abs.quantile(beta_pct))
         if self._beta_global < self._alpha_global:
             self._beta_global = self._alpha_global
         
@@ -268,14 +261,12 @@ class ThresholdCalibrator:
         In per_forw_percentile mode:
           - computes (alpha, beta) from |R_{t,forW}| percentiles as before.
         """
-        mode = self.cfg.calibration_mode
 
-        if mode == "exact_paper":
+        if self.cfg.calibration_mode == "exact_paper":
             if self._alpha_global is None or self._beta_global is None:
-                raise RuntimeError("Call prepare_global_thresholds(df) before calibrate() in exact_paper mode.")
+                raise RuntimeError("Call prepare_global_thresholds(df) first.")
             alpha = self._alpha_global
             beta  = self._beta_global * (1.0 + self.cfg.scale_beta_per_step * (forW - 1))
-            # guard just in case
             if beta < alpha:
                 beta = alpha
             return float(alpha), float(beta)

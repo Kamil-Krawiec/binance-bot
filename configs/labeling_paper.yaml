@@ -1,23 +1,13 @@
 symbol: "BTCUSDT"
 interval: "4h"
-start_date: "1 Jan 2017"  # for history_loader; not used in labeling
-fee: 0.002              
+start_date: "1 Jan 2020"
+fee: 0.002   
 
 backW: [1,2,3,4,5]
 forW:  [1,2,3,4,5]
 
-# Calibration mode faithful to the paper:
 calibration_mode: "exact_paper"
-
-# EITHER hard-code constants from the paper (for 4h, ref values were ~0.035 and 0.24)
-# alpha_const: 0.035
-# beta_const: 0.24
-
-# OR compute them from percentiles of single-candle returns (recommended)
-# (for 4h, ref values were ~0.025 and 0.997 
 single_candle_percentiles:
   alpha_pct: 0.25
   beta_pct: 0.997
-
-# Beta grows +10% per +1 forward bar (β_forW = β * (1 + 0.1*(forW-1)))
 scale_beta_per_step: 0.10
