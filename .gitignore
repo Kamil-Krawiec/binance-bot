@@ -213,3 +213,6 @@ history/
 data/
 binance-bot/
 notebooks/
+stage2_data/
+labeled_symbols.csv
+cache/

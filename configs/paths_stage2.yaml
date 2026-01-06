@@ -1,0 +1,3 @@
+processed_dir: "stage1/stage2_data/processed"
+datasets_dir: "stage1/stage2_data/datasets"
+reports_dir: "stage1/stage2_data/reports"

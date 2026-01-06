@@ -1,12 +1,13 @@
-symbol: "BTCUSDT"
+symbol: "*USDT"
 interval: "4h"
 start_date: "1 Jan 2020"
 fee: 0.001   
 backW: [1,2,3,4,5]
 forW:  [1,2,3,4,5]
+top_n_pairs: 600
 
 calibration_mode: "exact_paper"
 single_candle_percentiles:
-  alpha_pct: 0.24
+  alpha_pct: 0.85
   beta_pct: 0.997
 scale_beta_per_step: 0.10
