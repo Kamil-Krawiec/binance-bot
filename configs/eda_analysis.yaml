@@ -1,0 +1,23 @@
+train_path: "stage1/stage2_data/training/train_b5_f2.parquet"
+validation_path: "stage1/stage2_data/training/validation_b5_f2.parquet"
+manifest_path: "stage1/stage2_data/training/feature_manifest_b5_f2.json"
+xgboost_importance_path: "stage1/stage2_data/training/analysis/xgboost_feature_importance_scores.csv"
+output_dir: "stage1/stage2_data/eda"
+
+target_column: "label_id"
+label_column: "label"
+symbol_column: "symbol"
+time_column: "ts"
+
+sample:
+  random_state: 42
+  mutual_info_rows: 100000
+  plot_rows: 50000
+  library_rows: 20000
+
+analysis:
+  top_n: 20
+  top_distribution_features: 12
+  top_drift_features: 15
+  correlation_threshold: 0.95
+  library_enabled: true

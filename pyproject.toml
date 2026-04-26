@@ -18,9 +18,17 @@ dependencies = [
 dev = [
     "pytest",
 ]
+analysis = [
+    "matplotlib",
+    "scikit-learn",
+    "scipy",
+    "data-science-analysis-library==1.1",
+]
 
 [project.scripts]
-build-master-dataset = "binance_bot.cli:main"
+build-master-dataset = "binance_bot.cli:build_master_main"
+prepare-training-dataset = "binance_bot.cli:prepare_training_main"
+run-eda-analysis = "binance_bot.cli:run_eda_main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

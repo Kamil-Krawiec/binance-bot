@@ -58,3 +58,89 @@
 - First real output remains `backW=5`, `forW=2`.
 - S&P 500 / AlphaVantage features are planned as the next exogenous-feature expansion after local dataset generation is stable.
 - Existing generated artifacts stay where they are until a later data-layout phase.
+
+
+# Module 3 Plan: Baseline ML Models, Optuna Tuning, Paper-Faithful Backtest
+
+## Summary
+- Confirmed from the paper: `SELL` is a **long-position close signal**, not a short entry. The paper’s backtest enters on first `BUY`, holds through `BUY/HOLD`, closes on next `SELL`, and writes the strategy as `(Buy[Buy|Hold]*Sell)+`; it also describes the comparison strategy as buy-only. Source: Politecnico PDF, Backtesting section: https://iris.polito.it/retrieve/handle/11583/2983027/682057
+- Implement Module 3 as **paper long-only first**: no futures shorts yet.
+- Train and compare `DummyClassifier`, `RandomForestClassifier`, `MLPClassifier`, and `XGBClassifier`.
+- Use Optuna to tune real trading behavior: validation backtest return/profit factor with guardrails for minimum trades and max drawdown.
+- Keep validation unbalanced and untouched; use the current balanced train parquet only for fitting.
+
+## Key Changes
+- Add model config and CLI:
+  - `configs/model_baseline.yaml`
+  - CLI command: `train-baseline-models`
+- Add model pipeline modules:
+  - training loads `train_b5_f2.parquet`, `validation_b5_f2.parquet`, and `feature_manifest_b5_f2.json`
+  - feature list comes only from the manifest
+  - raw execution prices are joined from `master_dataset_b5_f2.parquet` by `symbol, ts`
+- Models:
+  - Dummy baseline using training label prior
+  - Random Forest with class weights
+  - sklearn MLP with `StandardScaler`
+  - XGBoost multiclass classifier
+- Optuna:
+  - install/add `optuna`
+  - tune XGBoost, Random Forest, and MLP with small bounded search spaces
+  - tune trading thresholds:
+    - `buy_threshold`
+    - `sell_threshold`
+    - `stop_loss`
+  - default stop-loss grid/range should include paper values: `0`, `0.01`, `0.025`, `0.05`, `0.10`
+- Backtest:
+  - state machine: `FLAT` or `LONG`
+  - if `FLAT` and `P(BUY) >= buy_threshold`, enter long at signal candle open
+  - if `LONG` and `P(SELL) >= sell_threshold`, exit at signal candle open
+  - repeated `BUY` while long does not add another position
+  - `SELL` while flat does nothing
+  - close remaining open positions at final available close
+  - include 0.1% fee per entry and exit
+  - apply stop-loss while in position using candle low/open-close data from master
+- Outputs under `stage1/stage2_data/models/`:
+  - fitted model files
+  - `model_comparison.json`
+  - `threshold_search.csv`
+  - `optuna_trials.csv`
+  - validation predictions parquet
+  - charts: confusion matrix, equity curve, drawdown curve, trades by symbol, threshold heatmap
+
+## Training And Evaluation
+- ML metrics:
+  - macro F1
+  - balanced accuracy
+  - per-class precision/recall for `BUY`, `HOLD`, `SELL`
+  - confusion matrix
+- Trading metrics:
+  - total ROI
+  - profit factor
+  - max drawdown
+  - number of trades
+  - win rate
+  - average win/loss
+  - average holding candles
+  - trades per symbol
+- Optuna objective:
+  - maximize validation ROI/profit factor
+  - reject/penalize trials with too few trades, excessive drawdown, or invalid probability behavior
+  - keep full trial history for review, not only the winner
+
+## Test Plan
+- Functional test that each model type can train on a tiny fixture and emit class probabilities.
+- Backtest tests:
+  - `BUY ... SELL` opens and closes one long trade
+  - repeated `BUY` while long does not pyramid
+  - `SELL` while flat does not short
+  - open position is closed at final candle
+  - stop-loss exits as expected
+  - fees reduce PnL
+- Optuna smoke test with 1-2 trials to verify objective wiring without expensive training.
+- CLI smoke test using tiny fixture paths.
+
+## Assumptions
+- First production backtest is long-only because that matches the paper.
+- Short/futures logic is deferred until after long-only model quality is understood.
+- MLP uses sklearn first for speed and simplicity; PyTorch can come later if sklearn MLP is promising.
+- Model selection prioritizes validation trading performance, not raw accuracy.

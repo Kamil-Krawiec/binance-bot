@@ -1,0 +1,40 @@
+master_path: "stage1/stage2_data/masters/master_dataset_b5_f2.parquet"
+output_dir: "stage1/stage2_data/training"
+
+features:
+  include_groups:
+    - technical
+    - advanced
+    - time
+    - sentiment
+  exclude_columns:
+    - open
+    - high
+    - low
+    - close
+    - volume
+    - ema_1
+    - ema_20
+    - ema_50
+    - ema_100
+  leakage_exclude_columns:
+    - return_1
+    - log_return_1
+    - pct_change
+  lag_periods: 1
+
+split:
+  validation_cutoff: "2025-12-31"
+  validation_end: "today"
+
+balance:
+  mode: "undersample_hold"
+  hold_multiplier: 1.5
+  random_state: 42
+
+analysis:
+  enabled: true
+  sample_size: 50000
+  top_n: 30
+  random_state: 42
+  target_strategy: "action_vs_hold"
