@@ -1,0 +1,13 @@
+backW: 5
+forW: 2
+
+processed_dir: "stage1/stage2_data/processed"
+labeled_datasets_dir: "stage1/stage2_data/datasets"
+symbols_file: "stage1/labeled_symbols.csv"
+output_path: "stage1/stage2_data/masters/master_dataset_b5_f2.parquet"
+
+features:
+  technical: true
+  fear_greed:
+    enabled: true
+    path: "cache/fear_greed_daily.csv"
